@@ -45,6 +45,7 @@ MODEL_OPTIONS = [
 ]
 BLOCKED_LABEL_KEYWORDS = ("porn", "hentai", "sexy")
 PASS_LABEL_KEYWORDS = ("safe", "drawing")
+FILTER_LABEL_OPTIONS = ("porn", "hentai", "sexy", "drawing", "normal")
 
 
 class NSFWContentError(Exception):
@@ -190,6 +191,128 @@ def _policy_decision(label_scores: List[Tuple[str, float]]) -> Tuple[bool, float
     return False, float(top_score), top_label
 
 
+def _normalize_label(label: str) -> str:
+    l = (label or "").lower().strip()
+    if "porn" in l:
+        return "porn"
+    if "hentai" in l:
+        return "hentai"
+    if "sexy" in l:
+        return "sexy"
+    if "drawing" in l:
+        return "drawing"
+    if "safe" in l or "normal" in l or "sfw" in l:
+        return "normal"
+    return l
+
+
+def _blocked_labels_from_policy(block_policy) -> set:
+    default_blocked = {"porn", "hentai", "sexy"}
+    if not isinstance(block_policy, dict):
+        return default_blocked
+    labels = block_policy.get("blocked_labels", None)
+    if not isinstance(labels, (list, tuple, set)):
+        return default_blocked
+    out = {_normalize_label(str(x)) for x in labels}
+    out = {x for x in out if x in FILTER_LABEL_OPTIONS}
+    return out if out else default_blocked
+
+
+def _policy_decision_with_blockset(
+    label_scores: List[Tuple[str, float]], blocked_labels: set
+) -> Tuple[bool, float, str]:
+    if not label_scores:
+        return False, 0.0, ""
+    top_label, top_score = max(label_scores, key=lambda x: float(x[1]))
+    top_norm = _normalize_label(str(top_label))
+    return top_norm in blocked_labels, float(top_score), str(top_label)
+
+
+class NSFWFilterLevelPolicy:
+    """
+    Build label-block policy by level.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "level": ("INT", {"default": 3, "min": 1, "max": 4, "step": 1}),
+                "level_1": (["Level 1: block porn"], {"default": "Level 1: block porn"}),
+                "level_2": (["Level 2: block porn + hentai"], {"default": "Level 2: block porn + hentai"}),
+                "level_3": (
+                    ["Level 3: block porn + hentai + sexy"],
+                    {"default": "Level 3: block porn + hentai + sexy"},
+                ),
+                "level_4": (
+                    ["Level 4: block porn + hentai + sexy + drawing"],
+                    {"default": "Level 4: block porn + hentai + sexy + drawing"},
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("NSFW_BLOCK_POLICY",)
+    RETURN_NAMES = ("block_policy",)
+    FUNCTION = "build_policy"
+    CATEGORY = "safety"
+
+    def build_policy(
+        self,
+        level: int,
+        level_1: str = "",
+        level_2: str = "",
+        level_3: str = "",
+        level_4: str = "",
+    ):
+        level = int(level)
+        if level <= 1:
+            blocked = ["porn"]
+        elif level == 2:
+            blocked = ["porn", "hentai"]
+        elif level == 3:
+            blocked = ["porn", "hentai", "sexy"]
+        else:
+            blocked = ["porn", "hentai", "sexy", "drawing"]
+        return ({"blocked_labels": blocked, "mode": "level", "level": level},)
+
+
+class NSFWFilterLabelPolicy:
+    """
+    Build label-block policy by manual checkboxes.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "porn": ("BOOLEAN", {"default": True}),
+                "hentai": ("BOOLEAN", {"default": True}),
+                "sexy": ("BOOLEAN", {"default": True}),
+                "drawing": ("BOOLEAN", {"default": False}),
+                "normal": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("NSFW_BLOCK_POLICY",)
+    RETURN_NAMES = ("block_policy",)
+    FUNCTION = "build_policy"
+    CATEGORY = "safety"
+
+    def build_policy(self, porn: bool, hentai: bool, sexy: bool, drawing: bool, normal: bool):
+        blocked = []
+        if porn:
+            blocked.append("porn")
+        if hentai:
+            blocked.append("hentai")
+        if sexy:
+            blocked.append("sexy")
+        if drawing:
+            blocked.append("drawing")
+        if normal:
+            blocked.append("normal")
+        return ({"blocked_labels": blocked, "mode": "manual"},)
+
+
 class NSFWCheck:
     """
     Checks images for NSFW content.
@@ -204,7 +327,10 @@ class NSFWCheck:
             "required": {
                 "image": ("IMAGE",),
                 "model_repo": (MODEL_OPTIONS, {"default": MODEL_OPTIONS[0]}),
-            }
+            },
+            "optional": {
+                "block_policy": ("NSFW_BLOCK_POLICY",),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -342,9 +468,10 @@ class NSFWCheck:
         interrupt_processing(True)
         raise Exception(json.dumps(error.to_dict()))
 
-    def check_nsfw(self, image: torch.Tensor, model_repo: str):
+    def check_nsfw(self, image: torch.Tensor, model_repo: str, block_policy=None):
         self._ensure_model(model_repo)
         model_bundle = NSFWCheck._cache[model_repo]
+        blocked_labels = _blocked_labels_from_policy(block_policy)
 
         max_block_conf = 0.0
         max_block_label = ""
@@ -354,7 +481,7 @@ class NSFWCheck:
             pil_image = Image.fromarray(img_np, mode="RGB")
 
             label_scores = self._predict_label_scores(model_bundle, pil_image)
-            should_block, conf, label = _policy_decision(label_scores)
+            should_block, conf, label = _policy_decision_with_blockset(label_scores, blocked_labels)
 
             if conf > max_block_conf:
                 max_block_conf = conf
@@ -397,7 +524,10 @@ class NSFWCheckWithModel:
             "required": {
                 "nsfw_model": ("NSFW_GUARD_MODEL",),
                 "image": ("IMAGE",),
-            }
+            },
+            "optional": {
+                "block_policy": ("NSFW_BLOCK_POLICY",),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -405,13 +535,14 @@ class NSFWCheckWithModel:
     FUNCTION = "check_nsfw"
     CATEGORY = "safety"
 
-    def check_nsfw(self, nsfw_model, image: torch.Tensor):
+    def check_nsfw(self, nsfw_model, image: torch.Tensor, block_policy=None):
         if not isinstance(nsfw_model, tuple) or len(nsfw_model) != 2:
             raise RuntimeError("Invalid NSFW_GUARD_MODEL. Use NSFW Load Model (HF) output.")
 
         _, model_bundle = nsfw_model
         if not isinstance(model_bundle, dict) or "backend" not in model_bundle:
             raise RuntimeError("Invalid NSFW_GUARD_MODEL payload.")
+        blocked_labels = _blocked_labels_from_policy(block_policy)
 
         checker = NSFWCheck()
         max_block_conf = 0.0
@@ -422,7 +553,7 @@ class NSFWCheckWithModel:
             pil_image = Image.fromarray(img_np, mode="RGB")
 
             label_scores = checker._predict_label_scores(model_bundle, pil_image)
-            should_block, conf, label = _policy_decision(label_scores)
+            should_block, conf, label = _policy_decision_with_blockset(label_scores, blocked_labels)
 
             if conf > max_block_conf:
                 max_block_conf = conf
@@ -438,10 +569,14 @@ NODE_CLASS_MAPPINGS = {
     "NSFWCheck": NSFWCheck,
     "NSFWLoadModel": NSFWLoadModel,
     "NSFWCheckWithModel": NSFWCheckWithModel,
+    "NSFWFilterLevelPolicy": NSFWFilterLevelPolicy,
+    "NSFWFilterLabelPolicy": NSFWFilterLabelPolicy,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "NSFWCheck": "NSFW Check (HF Classifier)",
     "NSFWLoadModel": "NSFW Load Model (HF)",
     "NSFWCheckWithModel": "NSFW Check (HF, Shared Model)",
+    "NSFWFilterLevelPolicy": "NSFW Filter Policy (Level 1-4)",
+    "NSFWFilterLabelPolicy": "NSFW Filter Policy (Label Table)",
 }

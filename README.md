@@ -62,6 +62,7 @@ What this node does:
 What this node does:
 - Takes `nsfw_model` from **NSFW Load Model (HF)**
 - Takes `image` input
+- Optional input: `block_policy` from policy nodes
 - Classifies the image and blocks if predicted class is `porn`, `hentai`, or `sexy`
 - Passes image through if class is `safe` or `drawing`
 
@@ -83,6 +84,27 @@ What this node does:
 ```
 
 This loads the model once and reuses it.
+
+## Extra Policy Nodes
+
+### NSFW Filter Policy (Level 1-4)
+
+Level mapping:
+- Level 1: block `porn`
+- Level 2: block `porn`, `hentai`
+- Level 3: block `porn`, `hentai`, `sexy`
+- Level 4: block `porn`, `hentai`, `sexy`, `drawing`
+
+### NSFW Filter Policy (Label Table)
+
+Available labels:
+- `porn`
+- `hentai`
+- `sexy`
+- `drawing`
+- `normal`
+
+You can select one or multiple labels to block, then connect the output to `block_policy` on check nodes.
 
 ## Reference of model check NSFW
 
