@@ -1,0 +1,7 @@
+# ComfyUI NSFW Guard (Viddexa) - Dependencies
+# Install with: pip install -r requirements.txt
+
+moderators
+huggingface_hub>=0.23.0
+transformers>=4.41.0
+safetensors>=0.4.3
