@@ -84,11 +84,6 @@ What this node does:
 
 This loads the model once and reuses it.
 
-## Reference of model check NSFW 
-
-Downloaded models are cached in:
-- `ComfyUI/models/nsfw/<repo_name_with_underscore>/`
-
 ## Reference of model check NSFW
 
 - [viddexa/nsfw-detection-2-mini](https://huggingface.co/viddexa/nsfw-detection-2-mini)
