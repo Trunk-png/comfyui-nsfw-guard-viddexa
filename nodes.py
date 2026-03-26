@@ -339,9 +339,11 @@ class NSFWCheck:
     CATEGORY = "safety"
 
     def _ensure_dependencies(self):
+        if snapshot_download is None:
+            raise RuntimeError("Missing dependency: huggingface_hub (snapshot_download required).")
         if AutoModerator is not None:
             return
-        if snapshot_download is not None and AutoImageProcessor is not None and AutoModelForImageClassification is not None:
+        if AutoImageProcessor is not None and AutoModelForImageClassification is not None:
             return
         raise RuntimeError(
             "Missing dependencies. Preferred: pip install moderators. "
@@ -357,9 +359,34 @@ class NSFWCheck:
         local_root = os.path.join(folder_paths.models_dir, "nsfw", model_folder_name)
         os.makedirs(local_root, exist_ok=True)
 
+        # Always materialize model files inside ComfyUI/models for docker-friendly builds.
+        model_dir = snapshot_download(
+            repo_id=model_repo,
+            local_dir=local_root,
+            local_dir_use_symlinks=False,
+            allow_patterns=["*.json", "*.safetensors", "*.bin"],
+        )
+
+        # Prefer the explicit local_root for stable location; snapshot path fallback when needed.
+        load_paths = [local_root]
+        if model_dir not in load_paths:
+            load_paths.append(model_dir)
+
         if AutoModerator is not None:
-            print(f"[NSFW Guard] Loading model via moderators from {model_repo}...")
-            moderator = AutoModerator.from_pretrained(model_repo)
+            print(f"[NSFW Guard] Loading model via moderators from local dir {local_root}...")
+            moderator = None
+            load_errors = []
+            for p in load_paths:
+                try:
+                    moderator = AutoModerator.from_pretrained(p, local_files_only=True)
+                    break
+                except Exception as e:
+                    load_errors.append(f"{p}: {e}")
+            if moderator is None:
+                raise RuntimeError(
+                    "Failed to load moderator model from local files only. "
+                    + " | ".join(load_errors)
+                )
             NSFWCheck._cache[model_repo] = {
                 "backend": "moderators",
                 "model": moderator,
@@ -369,19 +396,22 @@ class NSFWCheck:
             }
             return
 
-        if snapshot_download is None:
-            raise RuntimeError("moderators unavailable and snapshot_download unavailable for fallback.")
+        print(f"[NSFW Guard] Loading model (transformers fallback) from local dir {local_root}...")
 
-        model_dir = snapshot_download(
-            repo_id=model_repo,
-            local_dir=local_root,
-            local_dir_use_symlinks=False,
-            allow_patterns=["*.json", "*.safetensors", "*.bin"],
-        )
-        print(f"[NSFW Guard] Loading model (transformers fallback) from {model_dir}...")
-
-        processor = AutoImageProcessor.from_pretrained(model_dir)
-        model = AutoModelForImageClassification.from_pretrained(model_dir)
+        loaded = False
+        last_err = None
+        processor = None
+        model = None
+        for p in load_paths:
+            try:
+                processor = AutoImageProcessor.from_pretrained(p, local_files_only=True)
+                model = AutoModelForImageClassification.from_pretrained(p, local_files_only=True)
+                loaded = True
+                break
+            except Exception as e:
+                last_err = e
+        if not loaded:
+            raise RuntimeError(f"Failed to load transformers model from local files only: {last_err}")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
         model.eval()
