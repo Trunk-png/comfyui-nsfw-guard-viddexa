@@ -46,7 +46,7 @@ When NSFW is detected, the node:
 
 ## Nodes and Images
 
-### 1) `load-model.png` -> **NSFW Load Model (HF)**
+### 1) **NSFW Load Model (HF)**
 
 ![NSFW Load Model](load-model.png)
 
@@ -55,7 +55,7 @@ What this node does:
 - Outputs `NSFW_GUARD_MODEL`
 - Lets you reuse the same loaded model across multiple check nodes
 
-### 2) `node-check.png` -> **NSFW Check (HF, Shared Model)**
+### 2) **NSFW Check (HF, Shared Model)**
 
 ![NSFW Check Node](node-check.png)
 
@@ -65,7 +65,7 @@ What this node does:
 - Classifies the image and blocks if predicted class is `porn`, `hentai`, or `sexy`
 - Passes image through if class is `safe` or `drawing`
 
-### 3) `load-model-and-check.png` -> **NSFW Check (HF Classifier)** (single node)
+### 3) **NSFW Check (HF Classifier)** (single node)
 
 ![Load And Check In One Node](load-model-and-check.png)
 
