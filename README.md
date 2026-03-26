@@ -1,62 +1,95 @@
 # ComfyUI NSFW Guard (Viddexa)
 
-Node chặn NSFW cho ComfyUI, giữ logic như `comfyui-nsfw-guard` nhưng dùng model:
+Custom ComfyUI nodes for NSFW filtering with Viddexa models.
 
+Supported model repositories:
 - `viddexa/nsfw-detection-2-nano`
 - `viddexa/nsfw-detection-2-mini`
-- Backend ưu tiên: `moderators` (PyPI)
-- Fallback: `transformers`
 
-## Cài đặt
+Preferred backend:
+- `moderators` (PyPI)
 
-1. Copy thư mục này vào:
-   - `ComfyUI/custom_nodes/comfyui-nsfw-guard-viddexa`
-2. Cài dependency:
+Fallback backend:
+- `transformers`
+
+## Installation
+
+1. Go to your ComfyUI `custom_nodes` folder:
 
 ```bash
-pip install -r requirements.txt
+cd ComfyUI/custom_nodes
 ```
 
-3. Restart ComfyUI.
+2. Clone this repository:
 
-## Dùng node
+```bash
+git clone https://github.com/Trunk-png/comfyui-nsfw-guard-viddexa.git
+```
 
-- Node name: `NSFW Check (HF Classifier)`
-- Input: `image`
-- Output: `image` (pass-through nếu safe)
+3. Install dependencies:
 
-### Dùng chung 1 model cho nhiều điểm chặn
+```bash
+pip install -r comfyui-nsfw-guard-viddexa/requirements.txt
+```
 
-Node mới:
-- `NSFW Load Model (HF)` -> output `NSFW_GUARD_MODEL`
-- `NSFW Check (HF, Shared Model)` -> nhận `NSFW_GUARD_MODEL + image`
+4. Restart ComfyUI.
 
-`NSFW Load Model (HF)` có dropdown chọn model:
-- `viddexa/nsfw-detection-2-nano`
-- `viddexa/nsfw-detection-2-mini`
+## NSFW Policy
 
-Workflow gợi ý:
+- Blocked classes: `porn`, `hentai`, `sexy`
+- Allowed classes: `safe`, `drawing`
+
+When NSFW is detected, the node:
+- sends `nsfw_guard.content_blocked`
+- calls `interrupt_processing(True)`
+- raises an error with type `nsfw_content_detected`
+
+## Nodes and Images
+
+### 1) `load-model.png` -> **NSFW Load Model (HF)**
+
+![NSFW Load Model](load-model.png)
+
+What this node does:
+- Loads one selected model (`nano` or `mini`)
+- Outputs `NSFW_GUARD_MODEL`
+- Lets you reuse the same loaded model across multiple check nodes
+
+### 2) `node-check.png` -> **NSFW Check (HF, Shared Model)**
+
+![NSFW Check Node](node-check.png)
+
+What this node does:
+- Takes `nsfw_model` from **NSFW Load Model (HF)**
+- Takes `image` input
+- Classifies the image and blocks if predicted class is `porn`, `hentai`, or `sexy`
+- Passes image through if class is `safe` or `drawing`
+
+### 3) `load-model-and-check.png` -> **NSFW Check (HF Classifier)** (single node)
+
+![Load And Check In One Node](load-model-and-check.png)
+
+What this node does:
+- Combines model loading + NSFW check in one node
+- Simpler to use for one check point
+- For multi-point checking (input + output), the shared-model flow is more efficient
+
+## Recommended Workflow (Load Once, Check Multiple Times)
 
 ```text
-                 +-> [NSFW Check (HF, Shared Model)] -> (nhánh input check)
+                 +-> [NSFW Check (HF, Shared Model)] -> (input-side check)
 [NSFW Load Model]
-                 +-> [NSFW Check (HF, Shared Model)] -> (nhánh output check)
+                 +-> [NSFW Check (HF, Shared Model)] -> (output-side check)
 ```
 
-Cách này chỉ load model 1 lần, rồi dùng lại cho cả đầu input và output.
+This loads the model once and reuses it.
 
-Nếu phát hiện NSFW, node sẽ:
-- gửi event `nsfw_guard.content_blocked`
-- `interrupt_processing(True)`
-- raise error có type `nsfw_content_detected`
+## Reference of model check NSFW 
 
-## Rule chặn hiện tại
+Downloaded models are cached in:
+- `ComfyUI/models/nsfw/<repo_name_with_underscore>/`
 
-- Chặn: `porn`, `hentai`, `sexy`
-- Cho pass: `drawing`
+## Reference of model check NSFW
 
-## Model cache
-
-Model được tự động tải về:
-
-- `ComfyUI/models/nsfw/viddexa_nsfw_detection_2_nano/`
+- [viddexa/nsfw-detection-2-mini](https://huggingface.co/viddexa/nsfw-detection-2-mini)
+- [viddexa/nsfw-detection-2-nano](https://huggingface.co/viddexa/nsfw-detection-2-nano)
