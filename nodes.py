@@ -218,6 +218,20 @@ def _blocked_labels_from_policy(block_policy) -> set:
     return out if out else default_blocked
 
 
+def _as_bool(v, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in {"1", "true", "yes", "on"}:
+            return True
+        if s in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
 def _policy_decision_with_blockset(
     label_scores: List[Tuple[str, float]], blocked_labels: set
 ) -> Tuple[bool, float, str]:
@@ -555,6 +569,13 @@ class NSFWLoadModel:
     ):
         checker = NSFWCheck()
         checker._ensure_model(model_repo)
+        # Accept legacy/misaligned values from old saved workflows.
+        porn = _as_bool(porn, default=True)
+        hentai = _as_bool(hentai, default=True)
+        sexy = _as_bool(sexy, default=True)
+        drawing = _as_bool(drawing, default=False)
+        normal = _as_bool(normal, default=False)
+
         blocked = []
         if porn:
             blocked.append("porn")
