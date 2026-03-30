@@ -12,6 +12,7 @@ Blocking policy:
 
 import json
 import os
+from collections import deque
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -51,13 +52,14 @@ FILTER_LABEL_OPTIONS = ("porn", "hentai", "sexy", "drawing", "normal")
 class NSFWContentError(Exception):
     """Custom exception for NSFW content detection."""
 
-    def __init__(self, prediction: str, confidence: float):
+    def __init__(self, prediction: str, confidence: float, blocked_at: str = "none"):
         self.error_type = "nsfw_content_detected"
         self.prediction = prediction
         self.confidence = confidence
+        self.blocked_at = blocked_at
         message = (
             "NSFW content detected - workflow interrupted "
-            f"(prediction: {prediction}, confidence: {confidence:.2%})"
+            f"(blocked_at: {blocked_at}, prediction: {prediction}, confidence: {confidence:.2%})"
         )
         super().__init__(message)
 
@@ -69,6 +71,7 @@ class NSFWContentError(Exception):
                 "details": {
                     "prediction": self.prediction,
                     "confidence": self.confidence,
+                    "blocked_at": self.blocked_at,
                 },
             }
         }
@@ -242,6 +245,88 @@ def _policy_decision_with_blockset(
     return top_norm in blocked_labels, float(top_score), str(top_label)
 
 
+def _node_base_dir() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _save_dir_for_choice(save_to_input: bool, save_to_output: bool) -> str:
+    # Keep fixed storage folders inside this custom node package.
+    os.makedirs(os.path.join(_node_base_dir(), "input"), exist_ok=True)
+    os.makedirs(os.path.join(_node_base_dir(), "output"), exist_ok=True)
+
+    if save_to_input and save_to_output:
+        raise RuntimeError(
+            "save_to_input and save_to_output cannot both be True. "
+            "Use only one, or set both False."
+        )
+    if save_to_input:
+        return os.path.join(_node_base_dir(), "input")
+    if save_to_output:
+        return os.path.join(_node_base_dir(), "output")
+    return ""
+
+
+def _upstream_node_ids(prompt: dict, start_id) -> List[str]:
+    if not isinstance(prompt, dict):
+        return []
+
+    start = str(start_id)
+    visited = {start}
+    q = deque([start])
+    out: List[str] = []
+
+    while q:
+        node_id = q.popleft()
+        node = prompt.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            continue
+        for v in inputs.values():
+            if isinstance(v, list) and len(v) >= 1:
+                upstream_id = str(v[0])
+                if upstream_id not in visited:
+                    visited.add(upstream_id)
+                    q.append(upstream_id)
+                    out.append(upstream_id)
+    return out
+
+
+def _extract_original_filename(prompt, unique_id) -> str:
+    if not isinstance(prompt, dict):
+        return ""
+
+    for node_id in _upstream_node_ids(prompt, unique_id):
+        node = prompt.get(node_id, {})
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type", ""))
+        if class_type not in {"LoadImage", "LoadImageMask"}:
+            continue
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            continue
+        for key in ("image", "filename", "path"):
+            value = inputs.get(key)
+            if isinstance(value, str) and value.strip():
+                return os.path.basename(value)
+    return ""
+
+
+def _safe_blocked_name(filename: str) -> str:
+    name = os.path.basename((filename or "").strip())
+    return name or "blocked.png"
+
+
+def _blocked_at_value(save_to_input: bool, save_to_output: bool) -> str:
+    if save_to_input and not save_to_output:
+        return "input"
+    if save_to_output and not save_to_input:
+        return "output"
+    return "none"
+
+
 class NSFWFilterLevelPolicy:
     """
     Build label-block policy by level.
@@ -341,9 +426,15 @@ class NSFWCheck:
             "required": {
                 "image": ("IMAGE",),
                 "model_repo": (MODEL_OPTIONS, {"default": MODEL_OPTIONS[0]}),
+                "save_to_input": ("BOOLEAN", {"default": False}),
+                "save_to_output": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "block_policy": ("NSFW_BLOCK_POLICY",),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -492,11 +583,28 @@ class NSFWCheck:
                 pil_image,
             )
 
-    def _raise_block(self, blocked_label: str, confidence: float):
+    def _save_blocked_image(
+        self,
+        pil_image: Image.Image,
+        save_to_input: bool,
+        save_to_output: bool,
+        filename: str,
+    ):
+        save_dir = _save_dir_for_choice(save_to_input, save_to_output)
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        save_name = _safe_blocked_name(filename)
+        save_path = os.path.join(save_dir, save_name)
+        pil_image.save(save_path)
+        print(f"[NSFW Guard] Blocked image saved to: {save_path}")
+
+    def _raise_block(self, blocked_label: str, confidence: float, blocked_at: str = "none"):
         prediction = blocked_label or "nsfw"
         error = NSFWContentError(
             prediction=prediction,
             confidence=confidence,
+            blocked_at=blocked_at,
         )
 
         PromptServer.instance.send_sync(
@@ -505,6 +613,7 @@ class NSFWCheck:
                 "type": "nsfw_content_detected",
                 "prediction": prediction,
                 "confidence": confidence,
+                "blocked_at": blocked_at,
                 "message": str(error),
             },
         )
@@ -512,10 +621,23 @@ class NSFWCheck:
         interrupt_processing(True)
         raise Exception(json.dumps(error.to_dict()))
 
-    def check_nsfw(self, image: torch.Tensor, model_repo: str, block_policy=None):
+    def check_nsfw(
+        self,
+        image: torch.Tensor,
+        model_repo: str,
+        save_to_input: bool = False,
+        save_to_output: bool = False,
+        block_policy=None,
+        prompt=None,
+        unique_id=None,
+    ):
+        save_to_input = _as_bool(save_to_input, default=False)
+        save_to_output = _as_bool(save_to_output, default=False)
         self._ensure_model(model_repo)
         model_bundle = NSFWCheck._cache[model_repo]
         blocked_labels = _blocked_labels_from_policy(block_policy)
+        source_filename = _extract_original_filename(prompt, unique_id)
+        blocked_at = _blocked_at_value(save_to_input, save_to_output)
 
         max_block_conf = 0.0
         max_block_label = ""
@@ -532,7 +654,8 @@ class NSFWCheck:
                 max_block_label = label
 
             if should_block:
-                self._raise_block(max_block_label, max_block_conf)
+                self._save_blocked_image(pil_image, save_to_input, save_to_output, source_filename)
+                self._raise_block(max_block_label, max_block_conf, blocked_at=blocked_at)
 
         return (image,)
 
@@ -600,9 +723,15 @@ class NSFWCheckWithModel:
             "required": {
                 "nsfw_model": ("NSFW_GUARD_MODEL",),
                 "image": ("IMAGE",),
+                "save_to_input": ("BOOLEAN", {"default": False}),
+                "save_to_output": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "block_policy": ("NSFW_BLOCK_POLICY",),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -611,7 +740,18 @@ class NSFWCheckWithModel:
     FUNCTION = "check_nsfw"
     CATEGORY = "safety"
 
-    def check_nsfw(self, nsfw_model, image: torch.Tensor, block_policy=None):
+    def check_nsfw(
+        self,
+        nsfw_model,
+        image: torch.Tensor,
+        save_to_input: bool = False,
+        save_to_output: bool = False,
+        block_policy=None,
+        prompt=None,
+        unique_id=None,
+    ):
+        save_to_input = _as_bool(save_to_input, default=False)
+        save_to_output = _as_bool(save_to_output, default=False)
         if not isinstance(nsfw_model, tuple) or len(nsfw_model) not in (2, 3):
             raise RuntimeError("Invalid NSFW_GUARD_MODEL. Use NSFW Load Model (HF) output.")
 
@@ -622,6 +762,8 @@ class NSFWCheckWithModel:
         if block_policy is None and isinstance(bundled_policy, dict):
             block_policy = bundled_policy
         blocked_labels = _blocked_labels_from_policy(block_policy)
+        source_filename = _extract_original_filename(prompt, unique_id)
+        blocked_at = _blocked_at_value(save_to_input, save_to_output)
 
         checker = NSFWCheck()
         max_block_conf = 0.0
@@ -639,7 +781,13 @@ class NSFWCheckWithModel:
                 max_block_label = label
 
             if should_block:
-                checker._raise_block(max_block_label, max_block_conf)
+                checker._save_blocked_image(
+                    pil_image,
+                    save_to_input,
+                    save_to_output,
+                    source_filename,
+                )
+                checker._raise_block(max_block_label, max_block_conf, blocked_at=blocked_at)
 
         return (image,)
 
