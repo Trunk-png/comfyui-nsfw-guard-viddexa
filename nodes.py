@@ -260,9 +260,15 @@ def _save_dir_for_choice(save_to_input: bool, save_to_output: bool) -> str:
             "Use only one, or set both False."
         )
     if save_to_input:
-        return os.path.join(_node_base_dir(), "input")
+        base_dir = os.path.join(_node_base_dir(), "input")
+        for d in FILTER_LABEL_OPTIONS:
+            os.makedirs(os.path.join(base_dir, d), exist_ok=True)
+        return base_dir
     if save_to_output:
-        return os.path.join(_node_base_dir(), "output")
+        base_dir = os.path.join(_node_base_dir(), "output")
+        for d in FILTER_LABEL_OPTIONS:
+            os.makedirs(os.path.join(base_dir, d), exist_ok=True)
+        return base_dir
     return ""
 
 
@@ -325,6 +331,39 @@ def _blocked_at_value(save_to_input: bool, save_to_output: bool) -> str:
     if save_to_output and not save_to_input:
         return "output"
     return "none"
+
+
+def _safe_label_for_filename(label: str) -> str:
+    raw = (label or "").strip().lower()
+    if not raw:
+        raw = "unknown"
+    out = []
+    for ch in raw:
+        if ch.isalnum() or ch in ("-", "_"):
+            out.append(ch)
+        elif ch.isspace():
+            out.append("_")
+        else:
+            out.append("_")
+    sanitized = "".join(out).strip("_")
+    return sanitized or "unknown"
+
+
+def _build_saved_image_name(input_filename: str, detected_label: str) -> str:
+    base_name = _safe_blocked_name(input_filename)
+    stem, ext = os.path.splitext(base_name)
+    if not ext:
+        ext = ".png"
+    safe_label = _safe_label_for_filename(detected_label)
+    return f"{stem}_{safe_label}{ext}"
+
+
+def _folder_label_from_detected(detected_label: str) -> str:
+    normalized = _normalize_label(detected_label)
+    if normalized in FILTER_LABEL_OPTIONS:
+        return normalized
+    # Keep only 5 folders as requested.
+    return "normal"
 
 
 class NSFWFilterLevelPolicy:
@@ -583,21 +622,24 @@ class NSFWCheck:
                 pil_image,
             )
 
-    def _save_blocked_image(
+    def _save_checked_image(
         self,
         pil_image: Image.Image,
         save_to_input: bool,
         save_to_output: bool,
         filename: str,
+        detected_label: str,
     ):
         save_dir = _save_dir_for_choice(save_to_input, save_to_output)
         if not save_dir:
             return
+        folder_label = _folder_label_from_detected(detected_label)
+        save_dir = os.path.join(save_dir, folder_label)
         os.makedirs(save_dir, exist_ok=True)
-        save_name = _safe_blocked_name(filename)
+        save_name = _build_saved_image_name(filename, detected_label)
         save_path = os.path.join(save_dir, save_name)
         pil_image.save(save_path)
-        print(f"[NSFW Guard] Blocked image saved to: {save_path}")
+        print(f"[NSFW Guard] Checked image saved to: {save_path}")
 
     def _raise_block(self, blocked_label: str, confidence: float, blocked_at: str = "none"):
         prediction = blocked_label or "nsfw"
@@ -648,13 +690,19 @@ class NSFWCheck:
 
             label_scores = self._predict_label_scores(model_bundle, pil_image)
             should_block, conf, label = _policy_decision_with_blockset(label_scores, blocked_labels)
+            self._save_checked_image(
+                pil_image,
+                save_to_input,
+                save_to_output,
+                source_filename,
+                label,
+            )
 
             if conf > max_block_conf:
                 max_block_conf = conf
                 max_block_label = label
 
             if should_block:
-                self._save_blocked_image(pil_image, save_to_input, save_to_output, source_filename)
                 self._raise_block(max_block_label, max_block_conf, blocked_at=blocked_at)
 
         return (image,)
@@ -775,18 +823,19 @@ class NSFWCheckWithModel:
 
             label_scores = checker._predict_label_scores(model_bundle, pil_image)
             should_block, conf, label = _policy_decision_with_blockset(label_scores, blocked_labels)
+            checker._save_checked_image(
+                pil_image,
+                save_to_input,
+                save_to_output,
+                source_filename,
+                label,
+            )
 
             if conf > max_block_conf:
                 max_block_conf = conf
                 max_block_label = label
 
             if should_block:
-                checker._save_blocked_image(
-                    pil_image,
-                    save_to_input,
-                    save_to_output,
-                    source_filename,
-                )
                 checker._raise_block(max_block_label, max_block_conf, blocked_at=blocked_at)
 
         return (image,)
